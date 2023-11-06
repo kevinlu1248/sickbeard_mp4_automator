@@ -105,246 +105,22 @@ class MediaProcessor:
             self.log.exception("Error processing")
         return False
 
-    def post(self, output_files, mediatype, tvdbid=None, tmdbid=None, imdbid=None, season=None, episode=None):
-        if self.settings.postprocess:
-            if not tmdbid:
-                try:
-                    tagdata = Metadata(mediatype, tvdbid=tvdbid, tmdbid=tmdbid, imdbid=imdbid, season=season, episode=episode)
-                    tmdbid = tagdata.tmdbid
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    self.log.exception("Unable to get metadata.")
-                    tagdata = None
-
-            # Run any post process scripts
-            postprocessor = PostProcessor(output_files, self.log, wait=self.settings.waitpostprocess)
-            postprocessor.setEnv(mediatype, tmdbid, season, episode)
-            postprocessor.run_scripts()
-
-        # Refresh Plex
-        if self.settings.Plex.get('refresh', False):
-            try:
-                plex.refreshPlex(self.settings, output_files[0], self.log)
-            except KeyboardInterrupt:
-                raise
-            except:
-                self.log.exception("Error refreshing Plex.")
+    encode_file()
 
     # Process a file from start to finish, with checking to make sure formats are compatible with selected settings
-    def process(self, inputfile, reportProgress=False, original=None, info=None, progressOutput=None, tagdata=None):
-        self.log.debug("Process started.")
-
-        delete = self.settings.delete
-        deleted = False
-        options = None
-        preopts = None
-        postopts = None
-        outputfile = None
-        ripped_subs = []
-        downloaded_subs = []
-
-        info = info or self.isValidSource(inputfile, tagdata=tagdata)
-
-        self.settings.output_dir = self.settings.output_dir if self.outputDirHasFreeSpace(inputfile) else None
-
-        if info:
-            try:
-                options, preopts, postopts, ripsubopts, downloaded_subs = self.generateOptions(inputfile, info=info, original=original, tagdata=tagdata)
-            except KeyboardInterrupt:
-                raise
-            except:
-                self.log.exception("Unable to generate options, unexpected exception occurred.")
-                return None
-            if self.canBypassConvert(inputfile, info, options):
-                outputfile = inputfile
-                self.log.info("Bypassing conversion and setting outputfile to inputfile.")
-            else:
-                if not options:
-                    self.log.error("Error converting, inputfile %s had a valid extension but returned no data. Either the file does not exist, was unreadable, or was an incorrect format." % inputfile)
-                    return None
-
-                try:
-                    self.log.info("Output Data")
-                    self.log.info(json.dumps(options, sort_keys=False, indent=4))
-                    self.log.info("Preopts")
-                    self.log.info(json.dumps(preopts, sort_keys=False, indent=4))
-                    self.log.info("Postopts")
-                    self.log.info(json.dumps(postopts, sort_keys=False, indent=4))
-                    if not self.settings.embedsubs:
-                        self.log.info("Subtitle Extracts")
-                        self.log.info(json.dumps(ripsubopts, sort_keys=False, indent=4))
-                    if self.settings.downloadsubs:
-                        self.log.info("Downloaded Subtitles")
-                        self.log.info(json.dumps(downloaded_subs, sort_keys=False, indent=4))
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    self.log.exception("Unable to log options.")
-
-                ripped_subs = self.ripSubs(inputfile, ripsubopts)
-                for rs in ripped_subs:
-                    self.cleanExternalSub(rs)
-                try:
-                    outputfile, inputfile = self.convert(options, preopts, postopts, reportProgress, progressOutput)
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    self.log.exception("Unexpected exception encountered during conversion")
-                    return None
-
-            if not outputfile:
-                self.log.debug("Error converting, no outputfile generated for inputfile %s." % inputfile)
-                return None
-
-            self.log.debug("%s created from %s successfully." % (outputfile, inputfile))
-
-            if outputfile == inputfile:
-                if self.settings.output_dir:
-                    try:
-                        outputfile = os.path.join(self.settings.output_dir, os.path.split(inputfile)[1])
-                        self.log.debug("Outputfile set to %s." % outputfile)
-                        shutil.copy(inputfile, outputfile)
-                    except KeyboardInterrupt:
-                        raise
-                    except:
-                        self.log.exception("Error moving file to output directory.")
-                        delete = False
-                else:
-                    delete = False
-
-            if delete:
-                self.log.debug("Attempting to remove %s." % inputfile)
-                if self.removeFile(inputfile):
-                    self.log.debug("%s deleted." % inputfile)
-                    deleted = True
-                else:
-                    self.log.error("Couldn't delete %s." % inputfile)
-
-                for subfile in self.deletesubs:
-                    self.log.debug("Attempting to remove subtitle %s." % subfile)
-                    if self.removeFile(subfile):
-                        self.log.debug("Subtitle %s deleted." % subfile)
-                    else:
-                        self.log.debug("Unable to delete subtitle %s." % subfile)
-                self.deletesubs = set()
-
-            dim = self.getDimensions(outputfile)
-            input_extension = self.parseFile(inputfile)[2]
-            output_extension = self.parseFile(outputfile)[2]
-
-            rsi = 0
-            if self.settings.output_format in ['mkv'] and self.settings.relocate_moov:
-                self.log.debug("Relocate MOOV enabled but format is %s, adding reserve_index_space parameter.")
-                rsi = info.format.duration / (60 * 60)
-                rsi = int(rsi) if rsi == int(rsi) else int(rsi) + 1
-                rsi = rsi * 50
-
-            return {'input': inputfile,
-                    'input_extension': input_extension,
-                    'input_deleted': deleted,
-                    'output': outputfile,
-                    'output_extension': output_extension,
-                    'options': options,
-                    'preopts': preopts,
-                    'postopts': postopts,
-                    'external_subs': downloaded_subs + ripped_subs,
-                    'x': dim['x'],
-                    'y': dim['y'],
-                    'rsi': rsi
-                    }
-        return None
+    download_subtitles()
 
     # Wipe disposition data based on settings
-    def cleanDispositions(self, info):
-        for stream in info.streams:
-            for dispo in self.settings.sanitize_disposition:
-                self.log.debug("Setting %s to False for stream %d [sanitize-disposition]." % (dispo, stream.index))
-                stream.disposition[dispo] = False
+    sync_external_subtitle()
 
     # Get title for video stream based on disposition
-    def videoStreamTitle(self, stream, options, hdr=False, tagdata=None):
-        width = options.get("width", 0)
-        height = options.get("height", 0)
-        if not width and not height:
-            width = stream.video_width or 0
-            height = stream.video_height or 0
-
-        if streamTitle:
-            try:
-                customTitle = streamTitle(self, stream, options, hdr=hdr, tagdata=tagdata)
-                if customTitle is not None:
-                    return customTitle
-            except:
-                self.log.exception("Custom streamTitle exception")
-
-        if self.settings.keep_titles and stream.metadata.get('title'):
-            return stream.metadata.get('title')
-
-        output = "Video"
-
-        if width >= 7600 or height >= 4300:
-            output = "8K"
-        elif width >= 3800 or height >= 2100:
-            output = "4K"
-        elif width >= 1900 or height >= 1060:
-            output = "FHD"
-        elif width >= 1260 or height >= 700:
-            output = "HD"
-        else:
-            output = "SD"
-
-        if hdr:
-            output += " HDR"
-        return output.strip() if output else None
+    clean_external_subtitle()
 
     # Get title for audio stream based on disposition
-    def audioStreamTitle(self, stream, options, tagdata=None):
-        if streamTitle:
-            try:
-                customTitle = streamTitle(self, stream, options, tagdata=tagdata)
-                if customTitle is not None:
-                    return customTitle
-            except:
-                self.log.exception("Custom streamTitle exception")
-
-        if self.settings.keep_titles and stream.metadata.get('title'):
-            return stream.metadata.get('title')
-
-        channels = options.get("channels", 0)
-        output = "Audio"
-        if channels == 1:
-            output = "Mono"
-        elif channels == 2:
-            output = "Stereo"
-        elif channels > 2:
-            output = "%d.1 Channel" % (channels - 1)
-
-        disposition = stream.disposition
-        for dispo in BaseCodec.DISPO_STRINGS:
-            if disposition.get(dispo):
-                output += " (%s)" % BaseCodec.DISPO_STRINGS[dispo]
-        return output.strip() if output else None
+    validate_subtitle_source_file()
 
     # Get title for subtitle stream based on disposition
-    def subtitleStreamTitle(self, stream, options, imageBased=False, path=None, tagdata=None):
-        if streamTitle:
-            try:
-                customTitle = streamTitle(self, stream, options, imageBased=imageBased, path=path, tagdata=None)
-                if customTitle is not None:
-                    return customTitle
-            except:
-                self.log.exception("Custom streamTitle exception")
-
-        if self.settings.keep_titles and stream.metadata.get('title'):
-            return stream.metadata.get('title')
-
-        output = ""
-        disposition = stream.disposition
-        for dispo in BaseCodec.DISPO_STRINGS:
-            if disposition.get(dispo):
-                output += "%s " % BaseCodec.DISPO_STRINGS[dispo]
-        return output.strip() if output else None
+    validate_source_file()
 
     # Determine if a file can be read by FFPROBE
     def isValidSource(self, inputfile, tagdata=None):
@@ -383,59 +159,7 @@ class MediaProcessor:
             return None
 
     # Determine if a file can be read by FFPROBE and is a subtitle only
-    def isValidSubtitleSource(self, inputfile):
-        _, _, extension = self.parseFile(inputfile)
-        if extension in bad_sub_extensions or extension in self.settings.ignored_extensions:
-            return None
-        try:
-            info = self.converter.probe(inputfile)
-            if info:
-                if len(info.subtitle) < 1 or info.video or len(info.audio) > 0:
-                    return None
-            return info
-        except KeyboardInterrupt:
-            raise
-        except:
-            self.log.exception("isValidSubtitleSource unexpectedly threw an exception, returning None.")
-            return None
-
-    # Parse filename of external subtitle file and set appropriate disposition and language information
-    def processExternalSub(self, valid_external_sub, inputfile):
-        if not valid_external_sub:
-            return valid_external_sub
-        _, filename, _ = self.parseFile(inputfile)
-        _, subname, _ = self.parseFile(valid_external_sub.path)
-        subname = subname[len(filename + os.path.extsep):]
-        lang = BaseCodec.UNDEFINED
-        for suf in subname.lower().split(os.path.extsep):
-            self.log.debug("Processing subtitle file suffix %s." % (suf))
-            l = getAlpha3TCode(suf)
-            if lang == BaseCodec.UNDEFINED and l != BaseCodec.UNDEFINED:
-                lang = l
-                self.log.debug("Found language match %s." % (lang))
-                continue
-            dsuf = BaseCodec.DISPO_ALTS.get(suf, suf)
-            if dsuf in BaseCodec.DISPOSITIONS:
-                valid_external_sub.subtitle[0].disposition[dsuf] = True
-                self.log.debug("Found disposition match %s." % (suf))
-        if self.settings.sdl and lang == BaseCodec.UNDEFINED:
-            lang = self.settings.sdl
-        valid_external_sub.subtitle[0].metadata['language'] = lang
-        return valid_external_sub
-
-    # Default audio language based on encoder options
-    def getDefaultAudioLanguage(self, options):
-        if isinstance(options, dict):
-            for a in options.get("audio", []):
-                if "+default" in a.get("disposition", "").lower():
-                    self.log.debug("Default audio language is %s." % a.get("language"))
-                    return a.get("language")
-        else:
-            for a in options.audio:
-                if a.disposition.get("default"):
-                    self.log.debug("Default audio language is %s." % a.metadata.get("language"))
-                    return a.metadata.get("language")
-        return None
+    get_audio_stream_title()
 
     # Get values for width and height to be passed to the tagging classes for proper HD tags
     def getDimensions(self, inputfile):
@@ -1216,7 +940,7 @@ class MediaProcessor:
                                 if new_sub:
                                     self.log.info("Subtitle %s extracted for cleaning/syncing [subtitles.cleanit, subtitles.ffsubsync]." % (new_sub_path))
                                     self.cleanExternalSub(new_sub.path)
-                                    self.syncExternalSub(new_sub.path, inputfile)
+                                    self.clean_disposition_data(new_sub, inputfile)
                                     valid_external_subs.append(new_sub)
                                 continue
                         except:
@@ -1451,6 +1175,9 @@ class MediaProcessor:
                     self.log.warning("===========WARNING===========")
 
         return options, preopts, postopts, ripsubopts, downloaded_subs
+
+    def clean_disposition_data(self, new_sub, inputfile):
+        self.syncExternalSub(new_sub.path, inputfile)
 
     # Determine if a stream has a valid language for the main option generator
     def validLanguage(self, language, whitelist, blocked=[]):
@@ -1801,14 +1528,7 @@ class MediaProcessor:
         return valid_external_subs
 
     # Process external subtitle file with CleanIt library
-    def cleanExternalSub(self, path):
-        if self.settings.cleanit and cleanit:
-            self.log.debug("Cleaning subtitle with path %s [subtitles.cleanit]." % (path))
-            sub = cleanit.Subtitle(path)
-            cfg = cleanit.Config.from_path(self.settings.cleanit_config) if self.settings.cleanit_config else cleanit.Config()
-            rules = cfg.select_rules(tags=self.settings.cleanit_tags)
-            if sub.clean(rules):
-                sub.save()
+    get_video_stream_title()
 
     # FFSubsync
     def syncExternalSub(self, path, inputfile):
@@ -1863,100 +1583,7 @@ class MediaProcessor:
         return video
 
     # Download subtitles using subliminal
-    def downloadSubtitles(self, inputfile, existing_subtitle_streams, swl, original=None, tagdata=None):
-        if (self.settings.downloadsubs or self.settings.downloadforcedsubs) and subliminal and guessit and Language:
-            languages = set()
-            for alpha3 in swl:
-                try:
-                    languages.add(Language(alpha3))
-                except:
-                    self.log.exception("Unable to add language for download with subliminal.")
-            if self.settings.sdl:
-                try:
-                    languages.add(Language(self.settings.sdl))
-                except:
-                    self.log.exception("Unable to add language for download with subliminal.")
-
-            if len(languages) < 1:
-                self.log.error("No valid subtitle download languages detected, subtitles will not be downloaded.")
-                return []
-
-            self.log.info("Attempting to download subtitles.")
-
-            # Attempt to set the dogpile cache
-            try:
-                subliminal.region.configure('dogpile.cache.memory')
-            except:
-                pass
-
-            try:
-                video = MediaProcessor.custom_scan_video(os.path.abspath(inputfile), tagdata)
-
-                if self.settings.ignore_embedded_subs:
-                    video.subtitle_languages = set()
-                else:
-                    video.subtitle_languages = set([Language(x.metadata['language']) for x in existing_subtitle_streams])
-
-                if tagdata:
-                    self.log.debug("Refining subliminal search using included metadata")
-                    tagdate = tagdata.date
-                    try:
-                        tagdate = tagdata.date[:4]
-                    except:
-                        pass
-                    video.year = tagdate or video.year
-                    video.imdb_id = tagdata.imdbid or video.imdb_id
-                    if tagdata.mediatype == MediaType.Movie and isinstance(video, subliminal.Movie):
-                        subliminal.refine(video, title=tagdata.title, year=tagdate, imdb_id=tagdata.imdbid)
-                        video.title = tagdata.title or video.title
-                    elif tagdata.mediatype == MediaType.TV and isinstance(video, subliminal.Episode):
-                        subliminal.refine(video, series=tagdata.showname, year=tagdate, series_imdb_id=tagdata.imdbid, series_tvdb_id=tagdata.tvdbid, title=tagdata.title)
-                        video.series_tvdb_id = tagdata.tvdbid or video.series_tvdb_id
-                        video.series_imdb_id = tagdata.imdbid or video.series_imdb_id
-                        video.season = tagdata.season or video.season
-                        video.episodes = [tagdata.episode] or video.episodes
-                        video.series = tagdata.showname or video.series
-                        video.title = tagdata.title or video.title
-
-                # If data about the original release is available, include that in the search to best chance at accurate subtitles
-                if original:
-                    try:
-                        self.log.debug("Found original filename, adding data from %s." % original)
-                        og = guessit(original)
-                        self.log.debug("Source %s, release group %s, resolution %s, streaming service %s." % (og.get('source'), og.get('release_group'), og.get('screen_size'), og.get('streaming_service')))
-                        video.source = og.get('source') or video.source
-                        video.release_group = og.get('release_group') or video.release_group
-                        video.resolution = og.get('screen_size') or video.resolution
-                        video.streaming_service = og.get('streaming_service') or video.streaming_service
-                    except KeyboardInterrupt:
-                        raise
-                    except:
-                        self.log.exception("Error importing original file data for subliminal, will attempt to proceed.")
-
-                paths = []
-                if self.settings.downloadforcedsubs:
-                    forced_subtitles = [s for s in subliminal.list_subtitles([video], languages, providers=self.settings.subproviders, provider_configs=self.settings.subproviders_auth)[video] if ".forced" in s.info.lower()]
-                    self.log.debug("Found %d potential forced subtitles." % (len(forced_subtitles)))
-                    subliminal.download_subtitles(forced_subtitles, providers=self.settings.subproviders, provider_configs=self.settings.subproviders_auth)
-                    saves = subliminal.save_subtitles(video, forced_subtitles)
-                    paths.extend([(subliminal.subtitle.get_subtitle_path(video.name, x.language), x) for x in saves])
-                    for path, sub in paths:
-                        if ".forced" in sub.info and ".forced" not in path:
-                            base, ext = os.path.splitext(path)
-                            os.rename(path, "%s.forced%s" % (base, ext))
-                if self.settings.downloadsubs:
-                    subtitles = subliminal.download_best_subtitles([video], languages, hearing_impaired=self.settings.hearing_impaired, providers=self.settings.subproviders, provider_configs=self.settings.subproviders_auth)
-                    saves = subliminal.save_subtitles(video, subtitles[video])
-                    paths.extend([(subliminal.subtitle.get_subtitle_path(video.name, x.language), x) for x in saves])
-                for path, sub in paths:
-                    self.log.info("Downloaded new subtitle %s from source %s." % (path, sub.info))
-                    self.setPermissions(path)
-                return [p for p, _ in paths]
-            except KeyboardInterrupt:
-                raise
-            except:
-                self.log.exception("Unable to download subtitles.")
-        return []
+    process_file()
 
     # Scan for external chapters file
     def scanForExternalMetadata(self, inputfile, suffix="metadata.txt"):
@@ -2241,131 +1868,7 @@ class MediaProcessor:
         return " ".join("\"%s\"" % item if (" " in item or "|" in item) and "\"" not in item else item for item in cmds)
 
     # Encode a new file based on selected options, built in naming conflict resolution
-    def convert(self, options, preopts, postopts, reportProgress=False, progressOutput=None):
-        self.log.info("Starting conversion.")
-        inputfile = options['source'][0]
-        input_dir, filename, input_extension = self.parseFile(inputfile)
-        originalinputfile = inputfile
-        outputfile, output_dir = self.getOutputFile(input_dir, filename, input_extension, self.settings.temp_extension)
-        finaloutputfile, _ = self.getOutputFile(input_dir, filename, input_extension)
-
-        self.log.debug("Final output file: %s." % finaloutputfile)
-
-        if len(options['audio']) == 0:
-            self.log.error("Conversion has no audio streams, aborting")
-            return None, inputfile
-
-        # Check if input file and the final output file are the same and preferentially rename files (input first, then output if that fails)
-        if os.path.abspath(inputfile) == os.path.abspath(finaloutputfile):
-            self.log.debug("Inputfile and final outputfile are the same, trying to rename inputfile first.")
-            try:
-                og = inputfile + ".original"
-                i = 2
-                while os.path.isfile(og):
-                    og = "%s.%d.original" % (inputfile, i)
-                    i += 1
-                os.rename(inputfile, og)
-                if self.settings.burn_subtitles:
-                    try:
-                        if self.raw(os.path.abspath(inputfile)) in (options['video'].get('filter') or ""):
-                            self.log.debug("Renaming inputfile in burnsubtitles filter if its present [burn-subtitles].")
-                            options['video']['filter'] = options['video']['filter'].replace(self.raw(os.path.abspath(inputfile)), self.raw(os.path.abspath(og)))
-                    except:
-                        self.log.exception("Error trying to rename filter [burn-subtitles].")
-                inputfile = og
-                options['source'][0] = og
-                self.log.debug("Renamed original file to %s." % inputfile)
-
-            except:
-                i = 2
-                while os.path.isfile(finaloutputfile):
-                    outputfile, output_dir = self.getOutputFile(input_dir, filename, input_extension, self.settings.temp_extension, number=i)
-                    finaloutputfile, _ = self.getOutputFile(input_dir, filename, input_extension, number=i)
-                    i += 1
-                self.log.debug("Unable to rename inputfile. Alternatively renaming output file to %s." % outputfile)
-
-        # Delete output file if it already exists and deleting enabled
-        if os.path.exists(outputfile) and self.settings.delete:
-            self.removeFile(outputfile)
-
-        # Final sweep to make sure outputfile does not exist, renaming as the final solution
-        i = 2
-        while os.path.isfile(outputfile):
-            outputfile, output_dir = self.getOutputFile(input_dir, filename, input_extension, self.settings.temp_extension, number=i)
-            finaloutputfile, _ = self.getOutputFile(input_dir, filename, input_extension, number=i)
-            i += 1
-
-        try:
-            conv = self.converter.convert(outputfile, options, timeout=None, preopts=preopts, postopts=postopts, strip_metadata=self.settings.strip_metadata)
-        except KeyboardInterrupt:
-            raise
-        except:
-            self.log.exception("Error converting file.")
-            return None, inputfile
-
-        _, cmds = next(conv)
-        self.log.info("FFmpeg command:")
-        self.log.info("======================")
-        self.log.info(self.printableFFMPEGCommand(cmds))
-        self.log.info("======================")
-
-        try:
-            timecode = 0
-            debug = ""
-            for timecode, debug in conv:
-                if reportProgress:
-                    if progressOutput:
-                        progressOutput(timecode, debug)
-                    else:
-                        self.displayProgressBar(timecode, debug)
-            if reportProgress:
-                if progressOutput:
-                    progressOutput(100, debug)
-                else:
-                    self.displayProgressBar(100, newline=True)
-
-            self.log.info("%s created." % outputfile)
-            self.setPermissions(outputfile)
-
-        except FFMpegConvertError as e:
-            self.log.exception("Error converting file, FFMPEG error.")
-            self.log.error(e.cmd)
-            self.log.error(e.output)
-            if os.path.isfile(outputfile):
-                self.removeFile(outputfile)
-                self.log.error("%s deleted." % outputfile)
-            outputfile = None
-            try:
-                os.rename(inputfile, originalinputfile)
-                return None, originalinputfile
-            except KeyboardInterrupt:
-                raise
-            except:
-                self.log.exception("Error restoring original inputfile after exception.")
-                return None, inputfile
-        except KeyboardInterrupt:
-            raise
-        except:
-            self.log.exception("Unexpected exception during conversion.")
-            try:
-                os.rename(inputfile, originalinputfile)
-                return None, originalinputfile
-            except:
-                self.log.exception("Error restoring original inputfile after FFMPEG error.")
-                return None, inputfile
-
-        # Check if the finaloutputfile differs from the outputfile. This can happen during above renaming or from temporary extension option
-        if outputfile != finaloutputfile:
-            self.log.debug("Outputfile and finaloutputfile are different attempting to rename to final extension [temp_extension].")
-            try:
-                os.rename(outputfile, finaloutputfile)
-            except KeyboardInterrupt:
-                raise
-            except:
-                self.log.exception("Unable to rename output file to its final destination file extension [temp_extension].")
-                finaloutputfile = outputfile
-
-        return finaloutputfile, inputfile
+    run_post_process_scripts()
 
     # Generate progress bar
     def displayProgressBar(self, complete, debug="", width=20, newline=False):
@@ -2507,6 +2010,551 @@ class MediaProcessor:
         return True
 
     # Robust file removal function, with options to retry in the event the file is in use, and replace a deleted file
+    process_input_file()
+
+    # Formatter needed for burn subtitle filter syntax
+    def raw(self, text):
+        escape_dict = {'\\': r'\\',
+                       ':': "\\:"}
+        output = ''
+        for char in text:
+            try:
+                output += escape_dict[char]
+            except KeyError:
+                output += char
+        return output
+
+def encode_file():
+    def post(self, output_files, mediatype, tvdbid=None, tmdbid=None, imdbid=None, season=None, episode=None):
+        if self.settings.postprocess:
+            if not tmdbid:
+                try:
+                    tagdata = Metadata(mediatype, tvdbid=tvdbid, tmdbid=tmdbid, imdbid=imdbid, season=season, episode=episode)
+                    tmdbid = tagdata.tmdbid
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    self.log.exception("Unable to get metadata.")
+                    tagdata = None
+
+            # Run any post process scripts
+            postprocessor = PostProcessor(output_files, self.log, wait=self.settings.waitpostprocess)
+            postprocessor.setEnv(mediatype, tmdbid, season, episode)
+            postprocessor.run_scripts()
+
+        # Refresh Plex
+        if self.settings.Plex.get('refresh', False):
+            try:
+                plex.refreshPlex(self.settings, output_files[0], self.log)
+            except KeyboardInterrupt:
+                raise
+            except:
+                self.log.exception("Error refreshing Plex.")
+
+def download_subtitles():
+    def process(self, inputfile, reportProgress=False, original=None, info=None, progressOutput=None, tagdata=None):
+        self.log.debug("Process started.")
+
+        delete = self.settings.delete
+        deleted = False
+        options = None
+        preopts = None
+        postopts = None
+        outputfile = None
+        ripped_subs = []
+        downloaded_subs = []
+
+        info = info or self.isValidSource(inputfile, tagdata=tagdata)
+
+        self.settings.output_dir = self.settings.output_dir if self.outputDirHasFreeSpace(inputfile) else None
+
+        if info:
+            try:
+                options, preopts, postopts, ripsubopts, downloaded_subs = self.generateOptions(inputfile, info=info, original=original, tagdata=tagdata)
+            except KeyboardInterrupt:
+                raise
+            except:
+                self.log.exception("Unable to generate options, unexpected exception occurred.")
+                return None
+            if self.canBypassConvert(inputfile, info, options):
+                outputfile = inputfile
+                self.log.info("Bypassing conversion and setting outputfile to inputfile.")
+            else:
+                if not options:
+                    self.log.error("Error converting, inputfile %s had a valid extension but returned no data. Either the file does not exist, was unreadable, or was an incorrect format." % inputfile)
+                    return None
+
+                try:
+                    self.log.info("Output Data")
+                    self.log.info(json.dumps(options, sort_keys=False, indent=4))
+                    self.log.info("Preopts")
+                    self.log.info(json.dumps(preopts, sort_keys=False, indent=4))
+                    self.log.info("Postopts")
+                    self.log.info(json.dumps(postopts, sort_keys=False, indent=4))
+                    if not self.settings.embedsubs:
+                        self.log.info("Subtitle Extracts")
+                        self.log.info(json.dumps(ripsubopts, sort_keys=False, indent=4))
+                    if self.settings.downloadsubs:
+                        self.log.info("Downloaded Subtitles")
+                        self.log.info(json.dumps(downloaded_subs, sort_keys=False, indent=4))
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    self.log.exception("Unable to log options.")
+
+                ripped_subs = self.ripSubs(inputfile, ripsubopts)
+                for rs in ripped_subs:
+                    self.cleanExternalSub(rs)
+                try:
+                    outputfile, inputfile = self.convert(options, preopts, postopts, reportProgress, progressOutput)
+                except KeyboardInterrupt:
+                    raise
+                except:
+                    self.log.exception("Unexpected exception encountered during conversion")
+                    return None
+
+            if not outputfile:
+                self.log.debug("Error converting, no outputfile generated for inputfile %s." % inputfile)
+                return None
+
+            self.log.debug("%s created from %s successfully." % (outputfile, inputfile))
+
+            if outputfile == inputfile:
+                if self.settings.output_dir:
+                    try:
+                        outputfile = os.path.join(self.settings.output_dir, os.path.split(inputfile)[1])
+                        self.log.debug("Outputfile set to %s." % outputfile)
+                        shutil.copy(inputfile, outputfile)
+                    except KeyboardInterrupt:
+                        raise
+                    except:
+                        self.log.exception("Error moving file to output directory.")
+                        delete = False
+                else:
+                    delete = False
+
+            if delete:
+                self.log.debug("Attempting to remove %s." % inputfile)
+                if self.removeFile(inputfile):
+                    self.log.debug("%s deleted." % inputfile)
+                    deleted = True
+                else:
+                    self.log.error("Couldn't delete %s." % inputfile)
+
+                for subfile in self.deletesubs:
+                    self.log.debug("Attempting to remove subtitle %s." % subfile)
+                    if self.removeFile(subfile):
+                        self.log.debug("Subtitle %s deleted." % subfile)
+                    else:
+                        self.log.debug("Unable to delete subtitle %s." % subfile)
+                self.deletesubs = set()
+
+            dim = self.getDimensions(outputfile)
+            input_extension = self.parseFile(inputfile)[2]
+            output_extension = self.parseFile(outputfile)[2]
+
+            rsi = 0
+            if self.settings.output_format in ['mkv'] and self.settings.relocate_moov:
+                self.log.debug("Relocate MOOV enabled but format is %s, adding reserve_index_space parameter.")
+                rsi = info.format.duration / (60 * 60)
+                rsi = int(rsi) if rsi == int(rsi) else int(rsi) + 1
+                rsi = rsi * 50
+
+            return {'input': inputfile,
+                    'input_extension': input_extension,
+                    'input_deleted': deleted,
+                    'output': outputfile,
+                    'output_extension': output_extension,
+                    'options': options,
+                    'preopts': preopts,
+                    'postopts': postopts,
+                    'external_subs': downloaded_subs + ripped_subs,
+                    'x': dim['x'],
+                    'y': dim['y'],
+                    'rsi': rsi
+                    }
+        return None
+
+def sync_external_subtitle():
+    def cleanDispositions(self, info):
+        for stream in info.streams:
+            for dispo in self.settings.sanitize_disposition:
+                self.log.debug("Setting %s to False for stream %d [sanitize-disposition]." % (dispo, stream.index))
+                stream.disposition[dispo] = False
+
+def clean_external_subtitle():
+    def videoStreamTitle(self, stream, options, hdr=False, tagdata=None):
+        width = options.get("width", 0)
+        height = options.get("height", 0)
+        if not width and not height:
+            width = stream.video_width or 0
+            height = stream.video_height or 0
+
+        if streamTitle:
+            try:
+                customTitle = streamTitle(self, stream, options, hdr=hdr, tagdata=tagdata)
+                if customTitle is not None:
+                    return customTitle
+            except:
+                self.log.exception("Custom streamTitle exception")
+
+        if self.settings.keep_titles and stream.metadata.get('title'):
+            return stream.metadata.get('title')
+
+        output = "Video"
+
+        if width >= 7600 or height >= 4300:
+            output = "8K"
+        elif width >= 3800 or height >= 2100:
+            output = "4K"
+        elif width >= 1900 or height >= 1060:
+            output = "FHD"
+        elif width >= 1260 or height >= 700:
+            output = "HD"
+        else:
+            output = "SD"
+
+        if hdr:
+            output += " HDR"
+        return output.strip() if output else None
+
+def validate_subtitle_source_file():
+    def audioStreamTitle(self, stream, options, tagdata=None):
+        if streamTitle:
+            try:
+                customTitle = streamTitle(self, stream, options, tagdata=tagdata)
+                if customTitle is not None:
+                    return customTitle
+            except:
+                self.log.exception("Custom streamTitle exception")
+
+        if self.settings.keep_titles and stream.metadata.get('title'):
+            return stream.metadata.get('title')
+
+        channels = options.get("channels", 0)
+        output = "Audio"
+        if channels == 1:
+            output = "Mono"
+        elif channels == 2:
+            output = "Stereo"
+        elif channels > 2:
+            output = "%d.1 Channel" % (channels - 1)
+
+        disposition = stream.disposition
+        for dispo in BaseCodec.DISPO_STRINGS:
+            if disposition.get(dispo):
+                output += " (%s)" % BaseCodec.DISPO_STRINGS[dispo]
+        return output.strip() if output else None
+
+def validate_source_file():
+    def subtitleStreamTitle(self, stream, options, imageBased=False, path=None, tagdata=None):
+        if streamTitle:
+            try:
+                customTitle = streamTitle(self, stream, options, imageBased=imageBased, path=path, tagdata=None)
+                if customTitle is not None:
+                    return customTitle
+            except:
+                self.log.exception("Custom streamTitle exception")
+
+        if self.settings.keep_titles and stream.metadata.get('title'):
+            return stream.metadata.get('title')
+
+        output = ""
+        disposition = stream.disposition
+        for dispo in BaseCodec.DISPO_STRINGS:
+            if disposition.get(dispo):
+                output += "%s " % BaseCodec.DISPO_STRINGS[dispo]
+        return output.strip() if output else None
+
+def get_audio_stream_title():
+    def isValidSubtitleSource(self, inputfile):
+        _, _, extension = self.parseFile(inputfile)
+        if extension in bad_sub_extensions or extension in self.settings.ignored_extensions:
+            return None
+        try:
+            info = self.converter.probe(inputfile)
+            if info:
+                if len(info.subtitle) < 1 or info.video or len(info.audio) > 0:
+                    return None
+            return info
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.log.exception("isValidSubtitleSource unexpectedly threw an exception, returning None.")
+            return None
+
+    # Parse filename of external subtitle file and set appropriate disposition and language information
+    def processExternalSub(self, valid_external_sub, inputfile):
+        if not valid_external_sub:
+            return valid_external_sub
+        _, filename, _ = self.parseFile(inputfile)
+        _, subname, _ = self.parseFile(valid_external_sub.path)
+        subname = subname[len(filename + os.path.extsep):]
+        lang = BaseCodec.UNDEFINED
+        for suf in subname.lower().split(os.path.extsep):
+            self.log.debug("Processing subtitle file suffix %s." % (suf))
+            l = getAlpha3TCode(suf)
+            if lang == BaseCodec.UNDEFINED and l != BaseCodec.UNDEFINED:
+                lang = l
+                self.log.debug("Found language match %s." % (lang))
+                continue
+            dsuf = BaseCodec.DISPO_ALTS.get(suf, suf)
+            if dsuf in BaseCodec.DISPOSITIONS:
+                valid_external_sub.subtitle[0].disposition[dsuf] = True
+                self.log.debug("Found disposition match %s." % (suf))
+        if self.settings.sdl and lang == BaseCodec.UNDEFINED:
+            lang = self.settings.sdl
+        valid_external_sub.subtitle[0].metadata['language'] = lang
+        return valid_external_sub
+
+    # Default audio language based on encoder options
+    def getDefaultAudioLanguage(self, options):
+        if isinstance(options, dict):
+            for a in options.get("audio", []):
+                if "+default" in a.get("disposition", "").lower():
+                    self.log.debug("Default audio language is %s." % a.get("language"))
+                    return a.get("language")
+        else:
+            for a in options.audio:
+                if a.disposition.get("default"):
+                    self.log.debug("Default audio language is %s." % a.metadata.get("language"))
+                    return a.metadata.get("language")
+        return None
+
+def get_video_stream_title():
+    def cleanExternalSub(self, path):
+        if self.settings.cleanit and cleanit:
+            self.log.debug("Cleaning subtitle with path %s [subtitles.cleanit]." % (path))
+            sub = cleanit.Subtitle(path)
+            cfg = cleanit.Config.from_path(self.settings.cleanit_config) if self.settings.cleanit_config else cleanit.Config()
+            rules = cfg.select_rules(tags=self.settings.cleanit_tags)
+            if sub.clean(rules):
+                sub.save()
+
+def process_file():
+    def downloadSubtitles(self, inputfile, existing_subtitle_streams, swl, original=None, tagdata=None):
+        if (self.settings.downloadsubs or self.settings.downloadforcedsubs) and subliminal and guessit and Language:
+            languages = set()
+            for alpha3 in swl:
+                try:
+                    languages.add(Language(alpha3))
+                except:
+                    self.log.exception("Unable to add language for download with subliminal.")
+            if self.settings.sdl:
+                try:
+                    languages.add(Language(self.settings.sdl))
+                except:
+                    self.log.exception("Unable to add language for download with subliminal.")
+
+            if len(languages) < 1:
+                self.log.error("No valid subtitle download languages detected, subtitles will not be downloaded.")
+                return []
+
+            self.log.info("Attempting to download subtitles.")
+
+            # Attempt to set the dogpile cache
+            try:
+                subliminal.region.configure('dogpile.cache.memory')
+            except:
+                pass
+
+            try:
+                video = MediaProcessor.custom_scan_video(os.path.abspath(inputfile), tagdata)
+
+                if self.settings.ignore_embedded_subs:
+                    video.subtitle_languages = set()
+                else:
+                    video.subtitle_languages = set([Language(x.metadata['language']) for x in existing_subtitle_streams])
+
+                if tagdata:
+                    self.log.debug("Refining subliminal search using included metadata")
+                    tagdate = tagdata.date
+                    try:
+                        tagdate = tagdata.date[:4]
+                    except:
+                        pass
+                    video.year = tagdate or video.year
+                    video.imdb_id = tagdata.imdbid or video.imdb_id
+                    if tagdata.mediatype == MediaType.Movie and isinstance(video, subliminal.Movie):
+                        subliminal.refine(video, title=tagdata.title, year=tagdate, imdb_id=tagdata.imdbid)
+                        video.title = tagdata.title or video.title
+                    elif tagdata.mediatype == MediaType.TV and isinstance(video, subliminal.Episode):
+                        subliminal.refine(video, series=tagdata.showname, year=tagdate, series_imdb_id=tagdata.imdbid, series_tvdb_id=tagdata.tvdbid, title=tagdata.title)
+                        video.series_tvdb_id = tagdata.tvdbid or video.series_tvdb_id
+                        video.series_imdb_id = tagdata.imdbid or video.series_imdb_id
+                        video.season = tagdata.season or video.season
+                        video.episodes = [tagdata.episode] or video.episodes
+                        video.series = tagdata.showname or video.series
+                        video.title = tagdata.title or video.title
+
+                # If data about the original release is available, include that in the search to best chance at accurate subtitles
+                if original:
+                    try:
+                        self.log.debug("Found original filename, adding data from %s." % original)
+                        og = guessit(original)
+                        self.log.debug("Source %s, release group %s, resolution %s, streaming service %s." % (og.get('source'), og.get('release_group'), og.get('screen_size'), og.get('streaming_service')))
+                        video.source = og.get('source') or video.source
+                        video.release_group = og.get('release_group') or video.release_group
+                        video.resolution = og.get('screen_size') or video.resolution
+                        video.streaming_service = og.get('streaming_service') or video.streaming_service
+                    except KeyboardInterrupt:
+                        raise
+                    except:
+                        self.log.exception("Error importing original file data for subliminal, will attempt to proceed.")
+
+                paths = []
+                if self.settings.downloadforcedsubs:
+                    forced_subtitles = [s for s in subliminal.list_subtitles([video], languages, providers=self.settings.subproviders, provider_configs=self.settings.subproviders_auth)[video] if ".forced" in s.info.lower()]
+                    self.log.debug("Found %d potential forced subtitles." % (len(forced_subtitles)))
+                    subliminal.download_subtitles(forced_subtitles, providers=self.settings.subproviders, provider_configs=self.settings.subproviders_auth)
+                    saves = subliminal.save_subtitles(video, forced_subtitles)
+                    paths.extend([(subliminal.subtitle.get_subtitle_path(video.name, x.language), x) for x in saves])
+                    for path, sub in paths:
+                        if ".forced" in sub.info and ".forced" not in path:
+                            base, ext = os.path.splitext(path)
+                            os.rename(path, "%s.forced%s" % (base, ext))
+                if self.settings.downloadsubs:
+                    subtitles = subliminal.download_best_subtitles([video], languages, hearing_impaired=self.settings.hearing_impaired, providers=self.settings.subproviders, provider_configs=self.settings.subproviders_auth)
+                    saves = subliminal.save_subtitles(video, subtitles[video])
+                    paths.extend([(subliminal.subtitle.get_subtitle_path(video.name, x.language), x) for x in saves])
+                for path, sub in paths:
+                    self.log.info("Downloaded new subtitle %s from source %s." % (path, sub.info))
+                    self.setPermissions(path)
+                return [p for p, _ in paths]
+            except KeyboardInterrupt:
+                raise
+            except:
+                self.log.exception("Unable to download subtitles.")
+        return []
+
+def run_post_process_scripts():
+    def convert(self, options, preopts, postopts, reportProgress=False, progressOutput=None):
+        self.log.info("Starting conversion.")
+        inputfile = options['source'][0]
+        input_dir, filename, input_extension = self.parseFile(inputfile)
+        originalinputfile = inputfile
+        outputfile, output_dir = self.getOutputFile(input_dir, filename, input_extension, self.settings.temp_extension)
+        finaloutputfile, _ = self.getOutputFile(input_dir, filename, input_extension)
+
+        self.log.debug("Final output file: %s." % finaloutputfile)
+
+        if len(options['audio']) == 0:
+            self.log.error("Conversion has no audio streams, aborting")
+            return None, inputfile
+
+        # Check if input file and the final output file are the same and preferentially rename files (input first, then output if that fails)
+        if os.path.abspath(inputfile) == os.path.abspath(finaloutputfile):
+            self.log.debug("Inputfile and final outputfile are the same, trying to rename inputfile first.")
+            try:
+                og = inputfile + ".original"
+                i = 2
+                while os.path.isfile(og):
+                    og = "%s.%d.original" % (inputfile, i)
+                    i += 1
+                os.rename(inputfile, og)
+                if self.settings.burn_subtitles:
+                    try:
+                        if self.raw(os.path.abspath(inputfile)) in (options['video'].get('filter') or ""):
+                            self.log.debug("Renaming inputfile in burnsubtitles filter if its present [burn-subtitles].")
+                            options['video']['filter'] = options['video']['filter'].replace(self.raw(os.path.abspath(inputfile)), self.raw(os.path.abspath(og)))
+                    except:
+                        self.log.exception("Error trying to rename filter [burn-subtitles].")
+                inputfile = og
+                options['source'][0] = og
+                self.log.debug("Renamed original file to %s." % inputfile)
+
+            except:
+                i = 2
+                while os.path.isfile(finaloutputfile):
+                    outputfile, output_dir = self.getOutputFile(input_dir, filename, input_extension, self.settings.temp_extension, number=i)
+                    finaloutputfile, _ = self.getOutputFile(input_dir, filename, input_extension, number=i)
+                    i += 1
+                self.log.debug("Unable to rename inputfile. Alternatively renaming output file to %s." % outputfile)
+
+        # Delete output file if it already exists and deleting enabled
+        if os.path.exists(outputfile) and self.settings.delete:
+            self.removeFile(outputfile)
+
+        # Final sweep to make sure outputfile does not exist, renaming as the final solution
+        i = 2
+        while os.path.isfile(outputfile):
+            outputfile, output_dir = self.getOutputFile(input_dir, filename, input_extension, self.settings.temp_extension, number=i)
+            finaloutputfile, _ = self.getOutputFile(input_dir, filename, input_extension, number=i)
+            i += 1
+
+        try:
+            conv = self.converter.convert(outputfile, options, timeout=None, preopts=preopts, postopts=postopts, strip_metadata=self.settings.strip_metadata)
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.log.exception("Error converting file.")
+            return None, inputfile
+
+        _, cmds = next(conv)
+        self.log.info("FFmpeg command:")
+        self.log.info("======================")
+        self.log.info(self.printableFFMPEGCommand(cmds))
+        self.log.info("======================")
+
+        try:
+            timecode = 0
+            debug = ""
+            for timecode, debug in conv:
+                if reportProgress:
+                    if progressOutput:
+                        progressOutput(timecode, debug)
+                    else:
+                        self.displayProgressBar(timecode, debug)
+            if reportProgress:
+                if progressOutput:
+                    progressOutput(100, debug)
+                else:
+                    self.displayProgressBar(100, newline=True)
+
+            self.log.info("%s created." % outputfile)
+            self.setPermissions(outputfile)
+
+        except FFMpegConvertError as e:
+            self.log.exception("Error converting file, FFMPEG error.")
+            self.log.error(e.cmd)
+            self.log.error(e.output)
+            if os.path.isfile(outputfile):
+                self.removeFile(outputfile)
+                self.log.error("%s deleted." % outputfile)
+            outputfile = None
+            try:
+                os.rename(inputfile, originalinputfile)
+                return None, originalinputfile
+            except KeyboardInterrupt:
+                raise
+            except:
+                self.log.exception("Error restoring original inputfile after exception.")
+                return None, inputfile
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.log.exception("Unexpected exception during conversion.")
+            try:
+                os.rename(inputfile, originalinputfile)
+                return None, originalinputfile
+            except:
+                self.log.exception("Error restoring original inputfile after FFMPEG error.")
+                return None, inputfile
+
+        # Check if the finaloutputfile differs from the outputfile. This can happen during above renaming or from temporary extension option
+        if outputfile != finaloutputfile:
+            self.log.debug("Outputfile and finaloutputfile are different attempting to rename to final extension [temp_extension].")
+            try:
+                os.rename(outputfile, finaloutputfile)
+            except KeyboardInterrupt:
+                raise
+            except:
+                self.log.exception("Unable to rename output file to its final destination file extension [temp_extension].")
+                finaloutputfile = outputfile
+
+        return finaloutputfile, inputfile
+
+def process_input_file():
     def removeFile(self, filename, retries=2, delay=10, replacement=None):
         for _ in range(retries + 1):
             try:
@@ -2530,15 +2578,3 @@ class MediaProcessor:
                     self.log.debug("Delaying for %s seconds before retrying." % delay)
                     time.sleep(delay)
         return False if os.path.isfile(filename) else True
-
-    # Formatter needed for burn subtitle filter syntax
-    def raw(self, text):
-        escape_dict = {'\\': r'\\',
-                       ':': "\\:"}
-        output = ''
-        for char in text:
-            try:
-                output += escape_dict[char]
-            except KeyError:
-                output += char
-        return output
