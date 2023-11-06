@@ -2355,6 +2355,11 @@ class MediaProcessor:
                 return None, inputfile
 
         # Check if the finaloutputfile differs from the outputfile. This can happen during above renaming or from temporary extension option
+        finaloutputfile = self.generate_conversion_options(outputfile, finaloutputfile)
+
+        return finaloutputfile, inputfile
+
+    def generate_conversion_options(self, outputfile, finaloutputfile):
         if outputfile != finaloutputfile:
             self.log.debug("Outputfile and finaloutputfile are different attempting to rename to final extension [temp_extension].")
             try:
@@ -2364,8 +2369,7 @@ class MediaProcessor:
             except:
                 self.log.exception("Unable to rename output file to its final destination file extension [temp_extension].")
                 finaloutputfile = outputfile
-
-        return finaloutputfile, inputfile
+        return finaloutputfile
 
     # Generate progress bar
     def displayProgressBar(self, complete, debug="", width=20, newline=False):
