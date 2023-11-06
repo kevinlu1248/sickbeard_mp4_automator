@@ -683,192 +683,7 @@ class MediaProcessor:
         ###############################################################
         # Video stream
         ###############################################################
-        self.log.info("Reading video stream.")
-        self.log.info("Video codec detected: %s." % info.video.codec)
-        self.log.info("Pix Fmt: %s." % info.video.pix_fmt)
-        self.log.info("Profile: %s." % info.video.profile)
-
-        vdebug = "video"
-        vHDR = self.isHDR(info.video)
-        if vHDR:
-            vdebug = vdebug + ".hdr"
-
-        vcodecs = self.settings.hdr.get('codec', []) if vHDR and len(self.settings.hdr.get('codec', [])) > 0 else self.settings.vcodec
-        vcodecs = self.ffprobeSafeCodecs(vcodecs)
-        self.log.debug("Pool of video codecs is %s." % (vcodecs))
-        vcodec = "copy" if info.video.codec in vcodecs else vcodecs[0]
-
-        # Custom
-        try:
-            if blockVideoCopy and blockVideoCopy(self, info.video, inputfile):
-                self.log.info("Custom video stream copy check is preventing copying the stream.")
-                vdebug = vdebug + ".custom"
-                vcodec = vcodecs[0]
-        except KeyboardInterrupt:
-            raise
-        except:
-            self.log.exception("Custom video stream copy check error.")
-
-        vbitrate_estimate = self.estimateVideoBitrate(info)
-        vbitrate_ratio = self.settings.vbitrateratio.get(info.video.codec, self.settings.vbitrateratio.get("*", 1.0))
-        vbitrate = vbitrate_estimate * vbitrate_ratio
-        self.log.debug("Using video bitrate ratio of %f, which results in %f changing to %f." % (vbitrate_ratio, vbitrate_estimate, vbitrate))
-        if self.settings.vmaxbitrate and vbitrate > self.settings.vmaxbitrate:
-            self.log.debug("Overriding video bitrate. Codec cannot be copied because video bitrate is too high [video-max-bitrate].")
-            vdebug = vdebug + ".max-bitrate"
-            vcodec = vcodecs[0]
-            vbitrate = self.settings.vmaxbitrate
-
-        vwidth = None
-        if self.settings.vwidth and self.settings.vwidth < info.video.video_width:
-            self.log.debug("Video width is over the max width, it will be downsampled. Video stream can no longer be copied [video-max-width].")
-            vdebug = vdebug + ".max-width"
-            vcodec = vcodecs[0]
-            vwidth = self.settings.vwidth
-
-        vlevel = self.settings.video_level
-        if self.settings.video_level and info.video.video_level and (info.video.video_level > self.settings.video_level):
-            self.log.debug("Video level %0.1f. Codec cannot be copied because video level is too high [video-max-level]." % (info.video.video_level))
-            vdebug = vdebug + ".max-level"
-            vcodec = vcodecs[0]
-
-        vprofile = None
-        if vHDR and len(self.settings.hdr.get('profile')) > 0:
-            if info.video.profile in self.settings.hdr.get('profile'):
-                vprofile = info.video.profile
-            else:
-                vprofile = self.settings.hdr.get('profile')[0]
-                self.log.debug("Overriding video profile. Codec cannot be copied because profile is not approved [hdr-profile].")
-                vdebug = vdebug + ".hdr-profile-fmt"
-                vcodec = vcodecs[0]
-        else:
-            if len(self.settings.vprofile) > 0:
-                if info.video.profile in self.settings.vprofile:
-                    vprofile = info.video.profile
-                else:
-                    vprofile = self.settings.vprofile[0] if len(self.settings.vprofile) > 0 else None
-                    self.log.debug("Video profile is not supported. Video stream can no longer be copied [video-profile].")
-                    vdebug = vdebug + ".profile"
-                    vcodec = vcodecs[0]
-
-        vfieldorder = info.video.field_order
-
-        vcrf = self.settings.vcrf
-        vmaxrate = None
-        vbufsize = None
-        if len(self.settings.vcrf_profiles) > 0:
-            self.log.debug("VCRF profiles detected [video-crf-profiles].")
-            for profile in self.settings.vcrf_profiles:
-                try:
-                    if profile['source_bitrate'] < vbitrate_estimate:
-                        vcrf = profile['crf']
-                        vmaxrate = profile['maxrate']
-                        vbufsize = profile['bufsize']
-                        self.log.info("Acceptable profile match found for VBR %s using CRF %d, maxrate %s, bufsize %s." % (vbitrate_estimate, vcrf, vmaxrate, vbufsize))
-                        break
-                except:
-                    self.log.exception("Error setting VCRF profile information.")
-
-        vfilter = self.settings.hdr.get('filter') or None if vHDR else self.settings.vfilter or None
-        if vHDR and self.settings.hdr.get('filter') and self.settings.hdr.get('forcefilter'):
-            self.log.debug("Video HDR force filter is enabled. Video stream can no longer be copied [hdr-force-filter].")
-            vdebug = vdebug + ".hdr-force-filter"
-            vcodec = vcodecs[0]
-        elif not vHDR and vfilter and self.settings.vforcefilter:
-            self.log.debug("Video force filter is enabled. Video stream can no longer be copied [video-force-filter].")
-            vfilter = self.settings.vfilter
-            vcodec = vcodecs[0]
-            vdebug = vdebug + ".force-filter"
-
-        vpreset = self.settings.hdr.get('preset') or None if vHDR else self.settings.preset or None
-
-        vparams = self.settings.codec_params or None
-        if vHDR and self.settings.hdr.get('codec_params'):
-            vparams = self.settings.hdr.get('codec_params')
-
-        vpix_fmt = None
-        if vHDR and len(self.settings.hdr.get('pix_fmt')) > 0:
-            if info.video.pix_fmt in self.settings.hdr.get('pix_fmt'):
-                vpix_fmt = info.video.pix_fmt if self.settings.keep_source_pix_fmt else self.settings.hdr.get('pix_fmt')[0]
-            else:
-                vpix_fmt = self.settings.hdr.get('pix_fmt')[0]
-                self.log.debug("Overriding video pix_fmt. Codec cannot be copied because pix_fmt is not approved [hdr-pix-fmt].")
-                vdebug = vdebug + ".hdr-pix-fmt"
-                vcodec = vcodecs[0]
-        elif not vHDR and len(self.settings.pix_fmt):
-            if info.video.pix_fmt in self.settings.pix_fmt:
-                vpix_fmt = info.video.pix_fmt if self.settings.keep_source_pix_fmt else self.settings.pix_fmt[0]
-            else:
-                vpix_fmt = self.settings.pix_fmt[0]
-                self.log.debug("Overriding video pix_fmt. Codec cannot be copied because pix_fmt is not approved [pix-fmt].")
-                vdebug = vdebug + ".pix_fmt"
-                vcodec = vcodecs[0]
-
-        # Bit depth pix-fmt safety check
-        source_bit_depth = pix_fmts.get(info.video.pix_fmt, 0)
-        output_bit_depth = pix_fmts.get(vpix_fmt, 0)
-        bit_depth = output_bit_depth or source_bit_depth
-        self.log.debug("Source bit-depth %d, output %d, using depth %d." % (source_bit_depth, output_bit_depth, bit_depth))
-
-        if vcodec != 'copy':
-            vencoder = Converter.encoder(vcodec)
-            if vencoder and not vencoder.supportsBitDepth(bit_depth):
-                self.log.debug("Selected video encoder %s does not support bit depth %d." % (vcodec, bit_depth))
-                vpix_fmt = None
-                viable_formats = sorted([x for x in pix_fmts if pix_fmts[x] <= vencoder.max_depth], key=lambda x: pix_fmts[x], reverse=True)
-                match = re.search(r"yuv[a-z]?[0-9]{3}", info.video.pix_fmt)
-                if match:
-                    vpix_fmt = next((x for x in viable_formats if match.group(0) in x), None)
-                if vpix_fmt:
-                    self.log.info("Pix-fmt adjusted to %s in order to maintain compatible bit-depth <=%d." % (vpix_fmt, vencoder.max_depth))
-                else:
-                    self.log.debug("No viable pix-fmt option found for bit-depth %d, leave as %s." % (vencoder.max_depth, vpix_fmt))
-
-        vframedata = self.normalizeFramedata(info.video.framedata, vHDR) if self.settings.dynamic_params else None
-        if vpix_fmt and vframedata and "pix_fmt" in vframedata and vframedata["pix_fmt"] != vpix_fmt:
-            self.log.debug("Pix_fmt is changing, will not preserve framedata")
-            vframedata = None
-
-        vbsf = None
-        if self.settings.removebvs and self.hasBitstreamVideoSubs(info.video.framedata):
-            self.log.debug("Found side data type with closed captioning [remove-bitstream-subs]")
-            vbsf = "filter_units=remove_types=6"
-
-        self.log.debug("Video codec: %s." % vcodec)
-        self.log.debug("Video bitrate: %s." % vbitrate)
-        self.log.debug("Video CRF: %s." % vcrf)
-        self.log.debug("Video maxrate: %s." % vmaxrate)
-        self.log.debug("Video bufsize: %s." % vbufsize)
-        self.log.debug("Video level: %s." % vlevel)
-        self.log.debug("Video profile: %s." % vprofile)
-        self.log.debug("Video preset: %s." % vpreset)
-        self.log.debug("Video pix_fmt: %s." % vpix_fmt)
-        self.log.debug("Video field order: %s." % vfieldorder)
-        self.log.debug("Video width: %s." % vwidth)
-        self.log.debug("Video debug %s." % vdebug)
-        self.log.info("Video codec parameters %s." % vparams)
-        self.log.info("Creating %s video stream from source stream %d." % (vcodec, info.video.index))
-
-        video_settings = {
-            'codec': vcodec,
-            'map': info.video.index,
-            'bitrate': vbitrate,
-            'crf': vcrf,
-            'maxrate': vmaxrate,
-            'bufsize': vbufsize,
-            'level': vlevel,
-            'profile': vprofile,
-            'preset': vpreset,
-            'pix_fmt': vpix_fmt,
-            'field_order': vfieldorder,
-            'width': vwidth,
-            'filter': vfilter,
-            'params': vparams,
-            'framedata': vframedata,
-            'bsf': vbsf,
-            'debug': vdebug,
-        }
-        video_settings['title'] = self.videoStreamTitle(info.video, video_settings, hdr=vHDR, tagdata=tagdata)
+        vcodecs, video_settings = self.check_can_bypass_conversion(info, inputfile, pix_fmts, tagdata)
 
         ###############################################################
         # Audio streams
@@ -1451,6 +1266,197 @@ class MediaProcessor:
                     self.log.warning("===========WARNING===========")
 
         return options, preopts, postopts, ripsubopts, downloaded_subs
+
+    def check_can_bypass_conversion(self, info, inputfile, pix_fmts, tagdata):
+        # Video stream
+        ###############################################################
+        self.log.info("Reading video stream.")
+        self.log.info("Video codec detected: %s." % info.video.codec)
+        self.log.info("Pix Fmt: %s." % info.video.pix_fmt)
+        self.log.info("Profile: %s." % info.video.profile)
+
+        vdebug = "video"
+        vHDR = self.isHDR(info.video)
+        if vHDR:
+            vdebug = vdebug + ".hdr"
+
+        vcodecs = self.settings.hdr.get('codec', []) if vHDR and len(self.settings.hdr.get('codec', [])) > 0 else self.settings.vcodec
+        vcodecs = self.ffprobeSafeCodecs(vcodecs)
+        self.log.debug("Pool of video codecs is %s." % (vcodecs))
+        vcodec = "copy" if info.video.codec in vcodecs else vcodecs[0]
+
+        # Custom
+        try:
+            if blockVideoCopy and blockVideoCopy(self, info.video, inputfile):
+                self.log.info("Custom video stream copy check is preventing copying the stream.")
+                vdebug = vdebug + ".custom"
+                vcodec = vcodecs[0]
+        except KeyboardInterrupt:
+            raise
+        except:
+            self.log.exception("Custom video stream copy check error.")
+
+        vbitrate_estimate = self.estimateVideoBitrate(info)
+        vbitrate_ratio = self.settings.vbitrateratio.get(info.video.codec, self.settings.vbitrateratio.get("*", 1.0))
+        vbitrate = vbitrate_estimate * vbitrate_ratio
+        self.log.debug("Using video bitrate ratio of %f, which results in %f changing to %f." % (vbitrate_ratio, vbitrate_estimate, vbitrate))
+        if self.settings.vmaxbitrate and vbitrate > self.settings.vmaxbitrate:
+            self.log.debug("Overriding video bitrate. Codec cannot be copied because video bitrate is too high [video-max-bitrate].")
+            vdebug = vdebug + ".max-bitrate"
+            vcodec = vcodecs[0]
+            vbitrate = self.settings.vmaxbitrate
+
+        vwidth = None
+        if self.settings.vwidth and self.settings.vwidth < info.video.video_width:
+            self.log.debug("Video width is over the max width, it will be downsampled. Video stream can no longer be copied [video-max-width].")
+            vdebug = vdebug + ".max-width"
+            vcodec = vcodecs[0]
+            vwidth = self.settings.vwidth
+
+        vlevel = self.settings.video_level
+        if self.settings.video_level and info.video.video_level and (info.video.video_level > self.settings.video_level):
+            self.log.debug("Video level %0.1f. Codec cannot be copied because video level is too high [video-max-level]." % (info.video.video_level))
+            vdebug = vdebug + ".max-level"
+            vcodec = vcodecs[0]
+
+        vprofile = None
+        if vHDR and len(self.settings.hdr.get('profile')) > 0:
+            if info.video.profile in self.settings.hdr.get('profile'):
+                vprofile = info.video.profile
+            else:
+                vprofile = self.settings.hdr.get('profile')[0]
+                self.log.debug("Overriding video profile. Codec cannot be copied because profile is not approved [hdr-profile].")
+                vdebug = vdebug + ".hdr-profile-fmt"
+                vcodec = vcodecs[0]
+        else:
+            if len(self.settings.vprofile) > 0:
+                if info.video.profile in self.settings.vprofile:
+                    vprofile = info.video.profile
+                else:
+                    vprofile = self.settings.vprofile[0] if len(self.settings.vprofile) > 0 else None
+                    self.log.debug("Video profile is not supported. Video stream can no longer be copied [video-profile].")
+                    vdebug = vdebug + ".profile"
+                    vcodec = vcodecs[0]
+
+        vfieldorder = info.video.field_order
+
+        vcrf = self.settings.vcrf
+        vmaxrate = None
+        vbufsize = None
+        if len(self.settings.vcrf_profiles) > 0:
+            self.log.debug("VCRF profiles detected [video-crf-profiles].")
+            for profile in self.settings.vcrf_profiles:
+                try:
+                    if profile['source_bitrate'] < vbitrate_estimate:
+                        vcrf = profile['crf']
+                        vmaxrate = profile['maxrate']
+                        vbufsize = profile['bufsize']
+                        self.log.info("Acceptable profile match found for VBR %s using CRF %d, maxrate %s, bufsize %s." % (vbitrate_estimate, vcrf, vmaxrate, vbufsize))
+                        break
+                except:
+                    self.log.exception("Error setting VCRF profile information.")
+
+        vfilter = self.settings.hdr.get('filter') or None if vHDR else self.settings.vfilter or None
+        if vHDR and self.settings.hdr.get('filter') and self.settings.hdr.get('forcefilter'):
+            self.log.debug("Video HDR force filter is enabled. Video stream can no longer be copied [hdr-force-filter].")
+            vdebug = vdebug + ".hdr-force-filter"
+            vcodec = vcodecs[0]
+        elif not vHDR and vfilter and self.settings.vforcefilter:
+            self.log.debug("Video force filter is enabled. Video stream can no longer be copied [video-force-filter].")
+            vfilter = self.settings.vfilter
+            vcodec = vcodecs[0]
+            vdebug = vdebug + ".force-filter"
+
+        vpreset = self.settings.hdr.get('preset') or None if vHDR else self.settings.preset or None
+
+        vparams = self.settings.codec_params or None
+        if vHDR and self.settings.hdr.get('codec_params'):
+            vparams = self.settings.hdr.get('codec_params')
+
+        vpix_fmt = None
+        if vHDR and len(self.settings.hdr.get('pix_fmt')) > 0:
+            if info.video.pix_fmt in self.settings.hdr.get('pix_fmt'):
+                vpix_fmt = info.video.pix_fmt if self.settings.keep_source_pix_fmt else self.settings.hdr.get('pix_fmt')[0]
+            else:
+                vpix_fmt = self.settings.hdr.get('pix_fmt')[0]
+                self.log.debug("Overriding video pix_fmt. Codec cannot be copied because pix_fmt is not approved [hdr-pix-fmt].")
+                vdebug = vdebug + ".hdr-pix-fmt"
+                vcodec = vcodecs[0]
+        elif not vHDR and len(self.settings.pix_fmt):
+            if info.video.pix_fmt in self.settings.pix_fmt:
+                vpix_fmt = info.video.pix_fmt if self.settings.keep_source_pix_fmt else self.settings.pix_fmt[0]
+            else:
+                vpix_fmt = self.settings.pix_fmt[0]
+                self.log.debug("Overriding video pix_fmt. Codec cannot be copied because pix_fmt is not approved [pix-fmt].")
+                vdebug = vdebug + ".pix_fmt"
+                vcodec = vcodecs[0]
+
+        # Bit depth pix-fmt safety check
+        source_bit_depth = pix_fmts.get(info.video.pix_fmt, 0)
+        output_bit_depth = pix_fmts.get(vpix_fmt, 0)
+        bit_depth = output_bit_depth or source_bit_depth
+        self.log.debug("Source bit-depth %d, output %d, using depth %d." % (source_bit_depth, output_bit_depth, bit_depth))
+
+        if vcodec != 'copy':
+            vencoder = Converter.encoder(vcodec)
+            if vencoder and not vencoder.supportsBitDepth(bit_depth):
+                self.log.debug("Selected video encoder %s does not support bit depth %d." % (vcodec, bit_depth))
+                vpix_fmt = None
+                viable_formats = sorted([x for x in pix_fmts if pix_fmts[x] <= vencoder.max_depth], key=lambda x: pix_fmts[x], reverse=True)
+                match = re.search(r"yuv[a-z]?[0-9]{3}", info.video.pix_fmt)
+                if match:
+                    vpix_fmt = next((x for x in viable_formats if match.group(0) in x), None)
+                if vpix_fmt:
+                    self.log.info("Pix-fmt adjusted to %s in order to maintain compatible bit-depth <=%d." % (vpix_fmt, vencoder.max_depth))
+                else:
+                    self.log.debug("No viable pix-fmt option found for bit-depth %d, leave as %s." % (vencoder.max_depth, vpix_fmt))
+
+        vframedata = self.normalizeFramedata(info.video.framedata, vHDR) if self.settings.dynamic_params else None
+        if vpix_fmt and vframedata and "pix_fmt" in vframedata and vframedata["pix_fmt"] != vpix_fmt:
+            self.log.debug("Pix_fmt is changing, will not preserve framedata")
+            vframedata = None
+
+        vbsf = None
+        if self.settings.removebvs and self.hasBitstreamVideoSubs(info.video.framedata):
+            self.log.debug("Found side data type with closed captioning [remove-bitstream-subs]")
+            vbsf = "filter_units=remove_types=6"
+
+        self.log.debug("Video codec: %s." % vcodec)
+        self.log.debug("Video bitrate: %s." % vbitrate)
+        self.log.debug("Video CRF: %s." % vcrf)
+        self.log.debug("Video maxrate: %s." % vmaxrate)
+        self.log.debug("Video bufsize: %s." % vbufsize)
+        self.log.debug("Video level: %s." % vlevel)
+        self.log.debug("Video profile: %s." % vprofile)
+        self.log.debug("Video preset: %s." % vpreset)
+        self.log.debug("Video pix_fmt: %s." % vpix_fmt)
+        self.log.debug("Video field order: %s." % vfieldorder)
+        self.log.debug("Video width: %s." % vwidth)
+        self.log.debug("Video debug %s." % vdebug)
+        self.log.info("Video codec parameters %s." % vparams)
+        self.log.info("Creating %s video stream from source stream %d." % (vcodec, info.video.index))
+
+        video_settings = {
+            'codec': vcodec,
+            'map': info.video.index,
+            'bitrate': vbitrate,
+            'crf': vcrf,
+            'maxrate': vmaxrate,
+            'bufsize': vbufsize,
+            'level': vlevel,
+            'profile': vprofile,
+            'preset': vpreset,
+            'pix_fmt': vpix_fmt,
+            'field_order': vfieldorder,
+            'width': vwidth,
+            'filter': vfilter,
+            'params': vparams,
+            'framedata': vframedata,
+            'bsf': vbsf,
+            'debug': vdebug,
+        }
+        video_settings['title'] = self.videoStreamTitle(info.video, video_settings, hdr=vHDR, tagdata=tagdata)
+        return vcodecs, video_settings
 
     # Determine if a stream has a valid language for the main option generator
     def validLanguage(self, language, whitelist, blocked=[]):
@@ -2221,20 +2227,7 @@ class MediaProcessor:
         return False
 
     # Check if video file meets criteria to just bypass conversion
-    def canBypassConvert(self, inputfile, info, options=None):
-        # Process same extensions
-        if self.settings.output_extension == self.parseFile(inputfile)[2]:
-            if not self.settings.force_convert and not self.settings.process_same_extensions:
-                self.log.info("Input and output extensions are the same so passing back the original file [process-same-extensions: %s]." % self.settings.process_same_extensions)
-                return True
-            elif info.format.metadata.get('encoder', '').startswith('sma') and not self.settings.force_convert:
-                self.log.info("Input and output extensions match and the file appears to have already been processed by SMA, enable force-convert to override [force-convert: %s]." % self.settings.force_convert)
-                return True
-            elif self.settings.bypass_copy_all and options and len([x for x in [options['video']] + [x for x in options['audio']] + [x for x in options['subtitle']] if x['codec'] != 'copy']) == 0 and len(options['audio']) == len(info.audio) and len(options['subtitle']) == len(info.subtitle) and not self.settings.force_convert:
-                self.log.info("Input and output extensions match, the file appears to copying all streams, and is not reducing the number of streams, enable force-convert to override [bypass-if-copying-all] [force-convert: %s]." % self.settings.force_convert)
-                return True
-        self.log.debug("canBypassConvert returned False.")
-        return False
+    setup_video_codec_options()
 
     # Generate copy/paste friendly FFMPEG command
     def printableFFMPEGCommand(self, cmds):
@@ -2542,3 +2535,20 @@ class MediaProcessor:
             except KeyError:
                 output += char
         return output
+
+def setup_video_codec_options():
+    # Check if video file meets criteria to just bypass conversion
+    def canBypassConvert(self, inputfile, info, options=None):
+        # Process same extensions
+        if self.settings.output_extension == self.parseFile(inputfile)[2]:
+            if not self.settings.force_convert and not self.settings.process_same_extensions:
+                self.log.info("Input and output extensions are the same so passing back the original file [process-same-extensions: %s]." % self.settings.process_same_extensions)
+                return True
+            elif info.format.metadata.get('encoder', '').startswith('sma') and not self.settings.force_convert:
+                self.log.info("Input and output extensions match and the file appears to have already been processed by SMA, enable force-convert to override [force-convert: %s]." % self.settings.force_convert)
+                return True
+            elif self.settings.bypass_copy_all and options and len([x for x in [options['video']] + [x for x in options['audio']] + [x for x in options['subtitle']] if x['codec'] != 'copy']) == 0 and len(options['audio']) == len(info.audio) and len(options['subtitle']) == len(info.subtitle) and not self.settings.force_convert:
+                self.log.info("Input and output extensions match, the file appears to copying all streams, and is not reducing the number of streams, enable force-convert to override [bypass-if-copying-all] [force-convert: %s]." % self.settings.force_convert)
+                return True
+        self.log.debug("canBypassConvert returned False.")
+        return False
